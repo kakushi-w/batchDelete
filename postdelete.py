@@ -8,8 +8,11 @@ LOGIN_URL = "https://www.wikidot.com/default--flow/login__LoginPopupScreen"
 TEST_URL = "https://www.wikidot.com/account/activity"
 
 THREAD_ID_RE = re.compile(r't-(\d+)')
-POST_ID_RE = re.compile(r'id="post-(\d+)"')
 TARGET_RE = re.compile(r'<span class="target">.*?</span>', re.DOTALL)
+POST_USER_RE = re.compile(
+    r'id="post-(\d+)".*?class="printuser avatarhover">.*?alt="([^"]+)"',
+    re.DOTALL
+)
 
 CONCURRENT_REQUESTS = 20
 
@@ -62,7 +65,7 @@ async def get_total_pages(session, thread_url):
     return 1
 
 
-async def fetch_posts_from_page(session, sem, site_name, thread_id, page_no, token7, cookies_str):
+async def fetch_posts_from_page(session, sem, site_name, thread_id, page_no, token7, cookies_str, filter_user=None):
     async with sem:
         url = f"https://{site_name}.wikidot.com/ajax-module-connector.php"
         headers = {
@@ -83,21 +86,28 @@ async def fetch_posts_from_page(session, sem, site_name, thread_id, page_no, tok
                 res_text = await resp.text()
                 res_json = json.loads(res_text)
                 body = res_json.get("body", "")
-                post_ids = POST_ID_RE.findall(body)
-                print(f"  第{page_no}页: 获取到{len(post_ids)}个post")
-                return post_ids
+
+                matched_ids = []
+                for m in POST_USER_RE.finditer(body):
+                    post_id, alt_user = m.group(1), m.group(2)
+                    if filter_user is None or alt_user == filter_user:
+                        matched_ids.append(post_id)
+
+                print(f"  第{page_no}页: 筛选到{len(matched_ids)}个post")
+                return matched_ids
+
         except Exception as e:
             print(f"  获取第{page_no}页失败: {e}")
             return []
 
 
-async def get_all_post_ids(session, site_name, thread_id, thread_url, token7, cookies_str):
+async def get_all_post_ids(session, site_name, thread_id, thread_url, token7, cookies_str, filter_user=None):
     total_pages = await get_total_pages(session, thread_url)
     print(f"线程{thread_id}共{total_pages}页")
 
     sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
     tasks = [
-        fetch_posts_from_page(session, sem, site_name, thread_id, p, token7, cookies_str)
+        fetch_posts_from_page(session, sem, site_name, thread_id, p, token7, cookies_str, filter_user)
         for p in range(1, total_pages + 1)
     ]
     results = await asyncio.gather(*tasks)
@@ -165,6 +175,12 @@ async def main():
     username = input("用户名: ").strip()
     password = input("密码: ").strip()
     site_name = input("wiki名: ").strip()
+    filter_user = input("按用户名 留空删除所有: ").strip() or None
+
+    if filter_user:
+        print(f"仅删除用户{filter_user}的post")
+    else:
+        print("删除所有post")
 
     connector = aiohttp.TCPConnector(ssl=False, limit=0, ttl_dns_cache=300)
     jar = aiohttp.CookieJar(unsafe=True)
@@ -185,7 +201,7 @@ async def main():
                 continue
             thread_id = match.group(1)
             print(f"\n获取线程{thread_id}的post id中")
-            post_ids = await get_all_post_ids(session, site_name, thread_id, url, token7, cookies_str)
+            post_ids = await get_all_post_ids(session, site_name, thread_id, url, token7, cookies_str, filter_user)
             all_post_ids.extend(post_ids)
 
         with open("postid.txt", "w", encoding="utf-8") as f:
@@ -197,6 +213,13 @@ async def main():
             print("没任何postId，退")
             return
 
+        print(f"\n开始批量删除{len(all_post_ids)}个帖子")
+        await batch_delete(session, site_name, all_post_ids, cookies_str, token7)
+        print("\nOK了")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
         print(f"\n开始批量删除{len(all_post_ids)}个帖子")
         await batch_delete(session, site_name, all_post_ids, cookies_str, token7)
         print("\nOK了")
